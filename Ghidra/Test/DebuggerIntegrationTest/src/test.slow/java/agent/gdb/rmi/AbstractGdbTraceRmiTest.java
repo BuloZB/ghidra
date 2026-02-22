@@ -15,7 +15,7 @@
  */
 package agent.gdb.rmi;
 
-import static org.hamcrest.Matchers.startsWith;
+import static org.hamcrest.Matchers.*;
 import static org.junit.Assert.*;
 
 import java.io.*;
@@ -30,12 +30,11 @@ import java.util.stream.Collectors;
 import java.util.stream.Stream;
 
 import org.apache.commons.lang3.exception.ExceptionUtils;
-import org.junit.Before;
+import org.junit.*;
 
 import ghidra.app.plugin.core.debug.gui.AbstractGhidraHeadedDebuggerTest;
 import ghidra.app.plugin.core.debug.service.tracermi.TraceRmiPlugin;
 import ghidra.app.plugin.core.debug.utils.ManagedDomainObject;
-import ghidra.app.services.TraceRmiService;
 import ghidra.debug.api.tracermi.*;
 import ghidra.framework.*;
 import ghidra.framework.main.ApplicationLevelOnlyPlugin;
@@ -49,10 +48,10 @@ import ghidra.pty.testutil.DummyProc;
 import ghidra.trace.model.TraceExecutionState;
 import ghidra.trace.model.breakpoint.TraceBreakpointKind;
 import ghidra.trace.model.breakpoint.TraceBreakpointKind.TraceBreakpointKindSet;
-import ghidra.trace.model.target.*;
+import ghidra.trace.model.target.TraceObject;
+import ghidra.trace.model.target.TraceObjectValue;
 import ghidra.trace.model.target.path.KeyPath;
-import ghidra.util.Msg;
-import ghidra.util.NumericUtilities;
+import ghidra.util.*;
 
 public abstract class AbstractGdbTraceRmiTest extends AbstractGhidraHeadedDebuggerTest {
 	/**
@@ -70,7 +69,7 @@ public abstract class AbstractGdbTraceRmiTest extends AbstractGhidraHeadedDebugg
 			""";
 	// Connecting should be the first thing the script does, so use a tight timeout.
 	protected static final int CONNECT_TIMEOUT_MS = 3000;
-	protected static final int TIMEOUT_SECONDS = 300;
+	protected static final int TIMEOUT_SECONDS = SystemUtilities.isInTestingBatchMode() ? 10 : 300;
 	protected static final int QUIT_TIMEOUT_MS = 1000;
 	public static final String INSTRUMENT_STOPPED = """
 			ghidra trace tx-open "Fake" 'ghidra trace create-obj Inferiors[1]'
@@ -91,23 +90,64 @@ public abstract class AbstractGdbTraceRmiTest extends AbstractGhidraHeadedDebugg
 			end
 			python gdb.events.cont.connect(lambda e: gdb.execute("set-running"))""";
 
-	protected TraceRmiService traceRmi;
+	public static final boolean IS_WINDOWS =
+		OperatingSystem.CURRENT_OPERATING_SYSTEM == OperatingSystem.WINDOWS;
+
+	record PlatDep(String name, String endian, String lang, String cSpec,
+			String os, String startCmd, String callMne, String intReg, String floatReg) {
+		static final PlatDep ARM64 =
+			new PlatDep("arm64", "little", "AARCH64:LE:64:v8A", "default",
+				"macos", "start", "bl", "x0", "s0");
+		static final PlatDep X8664 = // Note AT&T callq
+			new PlatDep("x86_64", "little", "x86:LE:64:default", IS_WINDOWS ? "windows" : "gcc",
+				IS_WINDOWS ? "Windows" : "GNU/Linux", IS_WINDOWS ? "starti" : "start",
+				"callq", "rax", "st0");
+	}
+
+	public static final PlatDep PLAT = computePlat();
+
+	static PlatDep computePlat() {
+		return switch (System.getProperty("os.arch")) {
+			case "aarch64" -> PlatDep.ARM64;
+			case "x86" -> PlatDep.X8664;
+			case "amd64" -> PlatDep.X8664;
+			default -> throw new AssertionError(
+				"Unrecognized arch: " + System.getProperty("os.arch"));
+		};
+	}
+
+	/** Some snapshot likely to exceed the latest */
+	protected static final long SNAP = 100;
+
+	protected static boolean didSetupPython = false;
+
+	protected TraceRmiPlugin traceRmi;
 	private Path gdbPath;
 	private Path outFile;
 	private Path errFile;
 
-	// @BeforeClass
+	@BeforeClass
 	public static void setupPython() throws Throwable {
-		new ProcessBuilder("gradle", "Debugger-agent-gdb:assemblePyPackage")
+		if (didSetupPython) {
+			// Only do this once when running the full suite.
+			return;
+		}
+		if (SystemUtilities.isInTestingBatchMode()) {
+			// Don't run gradle in gradle. It already did this task.
+			return;
+		}
+		String gradleCmd = IS_WINDOWS ? "gradle.bat" : "gradle";
+		String gradle = DummyProc.which(gradleCmd);
+		new ProcessBuilder(gradle, "assemblePyPackage")
 				.directory(TestApplicationUtils.getInstallationDirectory())
 				.inheritIO()
 				.start()
 				.waitFor();
+		didSetupPython = true;
 	}
 
 	protected void setPythonPath(ProcessBuilder pb) throws IOException {
-		String sep =
-			OperatingSystem.CURRENT_OPERATING_SYSTEM == OperatingSystem.WINDOWS ? ";" : ":";
+		String sep = IS_WINDOWS ? ";" : ":";
 		String rmiPyPkg = Application.getModuleSubDirectory("Debugger-rmi-trace",
 			"build/pypkg/src").getAbsolutePath();
 		String gdbPyPkg = Application.getModuleSubDirectory("Debugger-agent-gdb",
@@ -127,6 +167,13 @@ public abstract class AbstractGdbTraceRmiTest extends AbstractGhidraHeadedDebugg
 		gdbPath = getGdbPath();
 		outFile = Files.createTempFile("gdbout", null);
 		errFile = Files.createTempFile("gdberr", null);
+	}
+
+	@After
+	public void tearDownTraceRmi() throws IOException {
+		for (TraceRmiConnection cx : traceRmi.getAllConnections()) {
+			cx.close();
+		}
 	}
 
 	protected void addAllDebuggerPlugins() throws PluginException {
@@ -164,7 +211,12 @@ public abstract class AbstractGdbTraceRmiTest extends AbstractGhidraHeadedDebugg
 
 		protected String handle() {
 			String filtErr = filterLines(stderr, line -> {
-				return !line.contains("warning: could not find '.gnu_debugaltlink' file");
+				return !line.contains("warning: could not find '.gnu_debugaltlink' file") &&
+					!line.contains("No symbol tbale loaded.") &&
+					!line.contains("Failed to resume program execution") &&
+					!line.contains("PC register is not available") &&
+					!line.contains("warning: ?????") &&
+					!line.contains("warning: cY");
 			});
 			if (!filtErr.isBlank() | 0 != exitCode) {
 				throw new GdbError(exitCode, stdout, stderr);
@@ -259,6 +311,7 @@ public abstract class AbstractGdbTraceRmiTest extends AbstractGhidraHeadedDebugg
 
 		@Override
 		public void close() throws Exception {
+			Exception finalExc = null;
 			Msg.info(this, "Cleaning up gdb");
 			try {
 				try {
@@ -284,16 +337,26 @@ public abstract class AbstractGdbTraceRmiTest extends AbstractGhidraHeadedDebugg
 					// expected
 				}
 				catch (ExecutionException e) {
-					if (!(e.getCause() instanceof TraceRmiError)) {
+					if (!(e.getCause() instanceof TraceRmiError ||
+						e.getCause() instanceof SocketException)) {
 						throw e;
 					}
 				}
-				GdbResult r = exec.future.get(TIMEOUT_SECONDS, TimeUnit.SECONDS);
-				r.handle();
-				waitForPass(() -> assertTrue(connection.isClosed()));
+				try {
+					GdbResult r = exec.future.get(TIMEOUT_SECONDS, TimeUnit.SECONDS);
+					r.handle();
+				}
+				catch (Exception e) {
+					finalExc = e;
+				}
+				waitForPass(this, () -> assertTrue(connection.isClosed()), TIMEOUT_SECONDS,
+					TimeUnit.SECONDS);
 			}
 			finally {
 				exec.gdb.destroyForcibly();
+				if (finalExc != null) {
+					throw finalExc;
+				}
 			}
 		}
 	}
@@ -371,6 +434,12 @@ public abstract class AbstractGdbTraceRmiTest extends AbstractGhidraHeadedDebugg
 			buf.write(lineData);
 		}
 		return new MemDump(address, buf.toByteArray());
+	}
+
+	protected void waitDomainObjectClosed(String path) {
+		DomainFile df = env.getProject().getProjectData().getFile(path);
+		assertNotNull(df);
+		waitForPass(() -> assertFalse(df.isOpen()));
 	}
 
 	protected ManagedDomainObject openDomainObject(String path) throws Exception {
@@ -523,4 +592,25 @@ public abstract class AbstractGdbTraceRmiTest extends AbstractGhidraHeadedDebugg
 		}
 		throw lastError;
 	}
+
+	public static String which(String cmd) {
+		return DummyProc.which(cmd).replace('\\', '/');
+	}
+
+	public static String projectName(String cmd) {
+		String ext = IS_WINDOWS ? ".exe" : "";
+		return "/New Traces/gdb/" + cmd + ext;
+	}
+
+	static String getSpecimenNewThreadAndExit() {
+		return IS_WINDOWS ? which("expCreateThreadExit") : which("expCloneExit");
+	}
+
+	static int getSleepThreadCount() {
+		// The targets above use different sleep methods:
+		//   Linux spawns clock_nanosleep
+		//   Windows spawns ZwDelayExecution and multiple ZwWaitForWork threads
+		return IS_WINDOWS ? 2 : 1;
+	}
+
 }

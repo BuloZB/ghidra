@@ -37,7 +37,7 @@ class StructureDB extends CompositeDB implements StructureInternal {
 
 	private int structLength;
 	private int structAlignment;  // reflects stored alignment, -1 if not yet stored
-	private int computedAlignment = -1; // cached alignment if not yet stored
+	private int computedAlignment = -1; // lazy, cached alignment, -1 if not yet computed
 
 	private int numComponents; // If packed, this does not include the undefined components.
 	private List<DataTypeComponentDB> components;
@@ -73,7 +73,11 @@ class StructureDB extends CompositeDB implements StructureInternal {
 			structLength = record.getIntValue(CompositeDBAdapter.COMPOSITE_LENGTH_COL);
 			structAlignment = record.getIntValue(CompositeDBAdapter.COMPOSITE_ALIGNMENT_COL);
 			computedAlignment = -1;
-			numComponents = isPackingEnabled() ? components.size()
+
+			boolean packingDisabled =
+				record.getIntValue(CompositeDBAdapter.COMPOSITE_PACKING_COL) < DEFAULT_PACKING;
+
+			numComponents = !packingDisabled ? components.size()
 					: record.getIntValue(CompositeDBAdapter.COMPOSITE_NUM_COMPONENTS_COL);
 
 			if (oldFlexArrayRecord != null) {
@@ -189,7 +193,7 @@ class StructureDB extends CompositeDB implements StructureInternal {
 			if (validatePackAndNotify) {
 				dataType = validateDataType(dataType);
 				dataType = resolve(dataType);
-				checkAncestry(dataType);
+				DataTypeUtilities.checkAncestry(this, dataType);
 			}
 
 			DataTypeComponentDB dtc = null;
@@ -251,7 +255,7 @@ class StructureDB extends CompositeDB implements StructureInternal {
 				// identify index of first defined-component to be removed
 				int index = Collections.binarySearch(components, Integer.valueOf(len),
 					OffsetComparator.INSTANCE);
-				
+
 				if (index < 0) {
 					index = -index - 1;
 				}
@@ -280,7 +284,7 @@ class StructureDB extends CompositeDB implements StructureInternal {
 			lock.release();
 		}
 	}
-	
+
 	@Override
 	public void growStructure(int amount) {
 		if (amount < 0) {
@@ -331,7 +335,7 @@ class StructureDB extends CompositeDB implements StructureInternal {
 			dataType = validateDataType(dataType);
 
 			dataType = resolve(dataType);
-			checkAncestry(dataType);
+			DataTypeUtilities.checkAncestry(this, dataType);
 
 			int idx;
 			if (isPackingEnabled()) {
@@ -1004,6 +1008,26 @@ class StructureDB extends CompositeDB implements StructureInternal {
 	}
 
 	/**
+	 * Find insertion index such that the index falls after all zero-length components at the
+	 * specified offset and before any bitfields at that offset.
+	 *
+	 * @param index any defined component index which contains offset.
+	 * @param offset offset within structure.
+	 * @return index of first non-zero-length defined checking in the forward direction.
+	 */
+	private int afterNonZeroComponentsAtOffset(int index, int offset) {
+		int maxIndex = components.size();
+		while (index < maxIndex) {
+			DataTypeComponentDB dtc = components.get(index);
+			if (dtc.getOffset() != offset || dtc.getLength() != 0) {
+				break;
+			}
+			++index;
+		}
+		return index;
+	}
+
+	/**
 	 * Identify defined-component index of the first non-zero-length component which contains the
 	 * specified offset. If only zero-length components exist, the last zero-length component which
 	 * contains the offset will be returned.
@@ -1311,12 +1335,15 @@ class StructureDB extends CompositeDB implements StructureInternal {
 			dataType = validateDataType(dataType);
 
 			dataType = resolve(dataType);
-			checkAncestry(dataType);
+			DataTypeUtilities.checkAncestry(this, dataType);
 
 			if ((offset > structLength) && !isPackingEnabled()) {
 				numComponents += offset - structLength;
 				structLength = offset;
 			}
+
+			// Any component insert at an offset should be placed after any zero-length components 
+			// at the same offset but before any non-zero-length component.
 
 			int index = Collections.binarySearch(components, Integer.valueOf(offset),
 				OffsetComparator.INSTANCE);
@@ -1324,8 +1351,11 @@ class StructureDB extends CompositeDB implements StructureInternal {
 			int additionalShift = 0;
 			if (index >= 0) {
 				index = backupToFirstComponentContainingOffset(index, offset);
-				DataTypeComponentDB dtc = components.get(index);
-				additionalShift = offset - dtc.getOffset();
+				index = afterNonZeroComponentsAtOffset(index, offset);
+				if (index < components.size()) {
+					DataTypeComponentDB dtc = components.get(index);
+					additionalShift = offset - dtc.getOffset();
+				}
 			}
 			else {
 				index = -index - 1;
@@ -1378,11 +1408,13 @@ class StructureDB extends CompositeDB implements StructureInternal {
 	 * @param componentName name of component replacement (may be null)
 	 * @param comment comment for component replacement (may be null)
 	 * @return new/updated component (may be null if replacement is not a defined component)
+	 * @throws IllegalArgumentException if unable to identify/make sufficient space
 	 * @throws IOException if an IO error occurs
 	 */
 	private DataTypeComponent doComponentReplacement(
 			LinkedList<DataTypeComponentDB> replacedComponents, int offset, DataType dataType,
-			int length, String componentName, String comment) throws IOException {
+			int length, String componentName, String comment)
+			throws IllegalArgumentException, IOException {
 
 		// Attempt quick update of a single defined component if possible.
 		// A quick update requires that component characteristics including length, offset,
@@ -1416,13 +1448,14 @@ class StructureDB extends CompositeDB implements StructureInternal {
 
 	@Override
 	public final DataTypeComponent replace(int ordinal, DataType dataType, int length)
-			throws IllegalArgumentException {
+			throws IllegalArgumentException, IndexOutOfBoundsException {
 		return replace(ordinal, dataType, length, null, null);
 	}
 
 	@Override
 	public DataTypeComponent replace(int ordinal, DataType dataType, int length,
-			String componentName, String comment) {
+			String componentName, String comment)
+			throws IllegalArgumentException, IndexOutOfBoundsException {
 		lock.acquire();
 		try {
 			checkDeleted();
@@ -1434,7 +1467,7 @@ class StructureDB extends CompositeDB implements StructureInternal {
 			dataType = validateDataType(dataType);
 
 			dataType = resolve(dataType);
-			checkAncestry(dataType);
+			DataTypeUtilities.checkAncestry(this, dataType);
 
 			length = getPreferredComponentLength(dataType, length);
 
@@ -1546,7 +1579,7 @@ class StructureDB extends CompositeDB implements StructureInternal {
 
 			dataType = validateDataType(dataType);
 			dataType = resolve(dataType);
-			checkAncestry(dataType);
+			DataTypeUtilities.checkAncestry(this, dataType);
 
 			LinkedList<DataTypeComponentDB> replacedComponents = new LinkedList<>();
 
@@ -1745,17 +1778,17 @@ class StructureDB extends CompositeDB implements StructureInternal {
 
 	private void doReplaceWithPacked(Structure struct, DataType[] resolvedDts) {
 		// assumes components is clear and that alignment characteristics have been set
-		DataTypeComponent[] otherComponents = struct.getDefinedComponents();
-		for (int i = 0; i < otherComponents.length; i++) {
-			DataTypeComponent dtc = otherComponents[i];
-			DataType dt = dtc.getDataType();
-			int length = (dt instanceof Dynamic) ? dtc.getLength() : -1;
-			try {
+		try {
+			DataTypeComponent[] otherComponents = struct.getDefinedComponents();
+			for (int i = 0; i < otherComponents.length; i++) {
+				DataTypeComponent dtc = otherComponents[i];
+				DataType dt = dtc.getDataType();
+				int length = (dt instanceof Dynamic) ? dtc.getLength() : -1;
 				doAdd(resolvedDts[i], length, dtc.getFieldName(), dtc.getComment(), false);
 			}
-			catch (DataTypeDependencyException e) {
-				throw new AssertException(e); // ancestry check already performed by caller
-			}
+		}
+		catch (DataTypeDependencyException e) {
+			throw new AssertException(e); // ancestry check already performed by caller
 		}
 	}
 
@@ -1829,6 +1862,9 @@ class StructureDB extends CompositeDB implements StructureInternal {
 
 	@Override
 	public void dataTypeDeleted(DataType dt) {
+		if (deleting) {
+			return;
+		}
 		lock.acquire();
 		try {
 			checkDeleted();
@@ -1836,20 +1872,30 @@ class StructureDB extends CompositeDB implements StructureInternal {
 			int n = components.size();
 			for (int i = n - 1; i >= 0; i--) {
 				DataTypeComponentDB dtc = components.get(i);
-				boolean removeBitFieldComponent = false;
 				if (dtc.isBitFieldComponent()) {
+					// Do not allow bitfield to be destroyed
+					// If base type is removed - revert to primitive type
 					BitFieldDataType bitfieldDt = (BitFieldDataType) dtc.getDataType();
-					removeBitFieldComponent = bitfieldDt.getBaseDataType() == dt;
+					if (bitfieldDt.getBaseDataType() == dt) {
+						AbstractIntegerDataType primitiveDt = bitfieldDt.getPrimitiveBaseDataType();
+						dataMgr.blockDataTypeRemoval(primitiveDt);
+						if (primitiveDt != dt && updateBitFieldDataType(dtc, dt, primitiveDt)) {
+							dtc.setComment(
+								prependComment("Type '" + dt.getDisplayName() + "' was deleted",
+									dtc.getComment()));
+							changed = true;
+						}
+					}
 				}
-				if (removeBitFieldComponent || dtc.getDataType() == dt) {
-					doDelete(i);
-					// for non-packed offsets of remaining components will not change
-					shiftOffsets(i, dtc.getLength() - 1, 0); // ordinals only
-					--numComponents; // may be revised by repack
+				else if (dtc.getDataType() == dt) {
+					setComponentDataType(dtc, BadDataType.dataType, i);
+					dtc.setComment(prependComment("Type '" + dt.getDisplayName() + "' was deleted",
+						dtc.getComment()));
 					changed = true;
 				}
 			}
-			if (changed && !repack(false, true)) {
+			// repack not needed for non-packed structure - nothing should move
+			if (changed && (!isPackingEnabled() || !repack(false, true))) {
 				dataMgr.dataTypeChanged(this, false);
 			}
 		}
@@ -1887,6 +1933,9 @@ class StructureDB extends CompositeDB implements StructureInternal {
 
 	@Override
 	public void dataTypeSizeChanged(DataType dt) {
+		if (deleting) {
+			return;
+		}
 		if (dt instanceof BitFieldDataType) {
 			return; // unsupported
 		}
@@ -2009,10 +2058,13 @@ class StructureDB extends CompositeDB implements StructureInternal {
 
 	@Override
 	public void dataTypeAlignmentChanged(DataType dt) {
+		if (deleting) {
+			return;
+		}
 		lock.acquire();
 		try {
+			checkDeleted();
 			if (isPackingEnabled()) {
-				checkDeleted();
 				repack(true, true);
 			}
 		}
@@ -2336,17 +2388,18 @@ class StructureDB extends CompositeDB implements StructureInternal {
 
 	@Override
 	public void dataTypeReplaced(DataType oldDt, DataType newDt) {
-		if (oldDt == this) {
+		if (deleting) {
 			return;
 		}
+		DataTypeUtilities.checkValidReplacement(oldDt, newDt);
 		lock.acquire();
 		try {
 			checkDeleted();
 			DataType replacementDt = newDt;
 			try {
-				validateDataType(replacementDt);
+				replacementDt = validateDataType(replacementDt); // blocks DEFAULT use for packed
 				replacementDt = resolve(replacementDt);
-				checkAncestry(replacementDt);
+				DataTypeUtilities.checkAncestry(this, replacementDt);
 			}
 			catch (Exception e) {
 				// Handle bad replacement with use of undefined component
@@ -2355,39 +2408,12 @@ class StructureDB extends CompositeDB implements StructureInternal {
 
 			boolean changed = false;
 			for (int i = components.size() - 1; i >= 0; i--) {
-
 				DataTypeComponentDB comp = components.get(i);
-
-				boolean remove = false;
 				if (comp.isBitFieldComponent()) {
-					try {
-						changed |= updateBitFieldDataType(comp, oldDt, replacementDt);
-					}
-					catch (InvalidDataTypeException e) {
-						Msg.error(this,
-							"Invalid bitfield replacement type " + newDt.getName() +
-								", removing bitfield " + comp.getDataType().getName() + ": " +
-								getPathName());
-						remove = true;
-					}
+					changed |= updateBitFieldDataType(comp, oldDt, replacementDt);
 				}
 				else if (comp.getDataType() == oldDt) {
-					if (replacementDt == DEFAULT && isPackingEnabled()) {
-						Msg.error(this,
-							"Invalid replacement type " + newDt.getName() +
-								", removing component " + comp.getDataType().getName() + ": " +
-								getPathName());
-						remove = true;
-					}
-					else {
-						setComponentDataType(comp, replacementDt, i);
-						changed = true;
-					}
-				}
-				if (remove) {
-					// error case - remove component
-					doDelete(i);
-					shiftOffsets(i, comp.getLength() - 1, 0); // ordinals only
+					setComponentDataType(comp, replacementDt, i);
 					changed = true;
 				}
 			}

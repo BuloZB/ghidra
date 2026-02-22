@@ -16,7 +16,6 @@
 apply plugin: 'eclipse'
 
 apply from: 'gradle/root/eclipse.gradle'
-apply from: "gradle/support/eclipseLauncher.gradle"
 apply from: "gradle/support/loadApplicationProperties.gradle"
 
 
@@ -89,6 +88,26 @@ else {
 			"  Ensure you have created the ${flatRepo.getName()} directory or ${f.getName()} file.\n\n\n");
 	}
 }
+
+/*********************************************************************************
+ *  Force all project compile classpaths to be resolved at configuration time.
+ *********************************************************************************/
+allprojects {
+	gradle.taskGraph.whenReady {
+		configurations.matching { it.name.endsWith("compileClasspath") }.all { cfg ->
+			if (cfg.canBeResolved) {
+				try {
+					cfg.files   // trigger resolution safely now
+				} catch (ignored) { }
+			}
+		}
+	}
+}
+
+/*********************************************************************************
+ *  Store :MarkdownSupport ClassPath to fix issues with Gradle 9.
+ *********************************************************************************/
+ext.markdownDeps = []
 
 /*********************************************************************************
  * Imports

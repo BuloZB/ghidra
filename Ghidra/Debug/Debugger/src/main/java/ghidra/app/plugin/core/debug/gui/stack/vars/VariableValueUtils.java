@@ -46,7 +46,6 @@ import ghidra.trace.model.memory.*;
 import ghidra.trace.model.stack.TraceStack;
 import ghidra.trace.model.stack.TraceStackFrame;
 import ghidra.trace.model.thread.TraceThread;
-import ghidra.trace.util.TraceAddressSpace;
 import ghidra.trace.util.TraceEvents;
 import ghidra.util.MathUtilities;
 import ghidra.util.Msg;
@@ -139,8 +138,7 @@ public enum VariableValueUtils {
 		}
 
 		@Override
-		protected Boolean evaluateLoad(Program program, PcodeOp op,
-				Map<Varnode, Boolean> already) {
+		protected Boolean evaluateLoad(Program program, PcodeOp op, Map<Varnode, Boolean> already) {
 			return evaluateVarnode(program, op.getInput(1), already);
 		}
 
@@ -181,8 +179,13 @@ public enum VariableValueUtils {
 		}
 
 		@Override
+		public boolean isImmutableSettings() {
+			return true;
+		}
+
+		@Override
 		public boolean isChangeAllowed(SettingsDefinition settingsDefinition) {
-			return delegate.isChangeAllowed(settingsDefinition);
+			return false;
 		}
 
 		@Override
@@ -269,9 +272,10 @@ public enum VariableValueUtils {
 		RegisterValue spRV = regs.getValue(platform, viewSnap, sp);
 		Address spVal = cSpec.getStackBaseSpace().getAddress(spRV.getUnsignedValue().longValue());
 		Address max;
-		TraceMemoryRegion stackRegion = mem.getRegionContaining(coordinates.getSnap(), spVal);
+		long snap = coordinates.getSnap();
+		TraceMemoryRegion stackRegion = mem.getRegionContaining(snap, spVal);
 		if (stackRegion != null) {
-			max = stackRegion.getMaxAddress();
+			max = stackRegion.getMaxAddress(snap);
 		}
 		else {
 			long toMax = spVal.getAddressSpace().getMaxAddress().subtract(spVal);
@@ -408,7 +412,7 @@ public enum VariableValueUtils {
 		if (stack == null) {
 			return null;
 		}
-		TraceStackFrame frame = stack.getFrame(0, false);
+		TraceStackFrame frame = stack.getFrame(snap, 0, false);
 		if (frame == null) {
 			return null;
 		}
@@ -472,9 +476,8 @@ public enum VariableValueUtils {
 	 */
 	public static boolean hasFreshUnwind(PluginTool tool, DebuggerCoordinates coordinates) {
 		ListingUnwoundFrame innermost = locateInnermost(tool, coordinates);
-		if (innermost == null || !Objects.equals(innermost.getProgramCounter(),
-			getProgramCounter(coordinates.getPlatform(), coordinates.getThread(),
-				coordinates.getViewSnap()))) {
+		if (innermost == null || !Objects.equals(innermost.getProgramCounter(), getProgramCounter(
+			coordinates.getPlatform(), coordinates.getThread(), coordinates.getViewSnap()))) {
 			return false;
 		}
 		return true;
@@ -497,7 +500,7 @@ public enum VariableValueUtils {
 	}
 
 	/**
-	 * Find the fuction's variable whose storage contains the given stack offset
+	 * Find the function's variable whose storage contains the given stack offset
 	 * 
 	 * @param function the function
 	 * @param stackAddress the stack offset
@@ -668,10 +671,9 @@ public enum VariableValueUtils {
 				listenFor(TraceEvents.BYTES_CHANGED, this::bytesChanged);
 			}
 
-			private void bytesChanged(TraceAddressSpace space, TraceAddressSnapRange range) {
-				TraceThread thread = space.getThread();
+			private void bytesChanged(AddressSpace space, TraceAddressSnapRange range) {
 				// TODO: Consider the lifespan, too? Would have to use viewport....
-				if (thread == null || thread == coordinates.getThread()) {
+				if (space.isMemorySpace() || coordinates.isRegisterSpace(space)) {
 					invalidateCache();
 				}
 			}
@@ -865,13 +867,12 @@ public enum VariableValueUtils {
 				address.isRegisterAddress()) {
 				settings = new DefaultSpaceSettings(settings, language.getDefaultSpace());
 			}
-			ByteMemBufferImpl buf =
-				new ByteMemBufferImpl(address, bytes, language.isBigEndian()) {
-					@Override
-					public Memory getMemory() {
-						return coordinates.getView().getMemory();
-					}
-				};
+			ByteMemBufferImpl buf = new ByteMemBufferImpl(address, bytes, language.isBigEndian()) {
+				@Override
+				public Memory getMemory() {
+					return coordinates.getView().getMemory();
+				}
+			};
 			return type.getRepresentation(buf, settings, bytes.length);
 		}
 

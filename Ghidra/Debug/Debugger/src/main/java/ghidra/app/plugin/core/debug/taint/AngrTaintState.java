@@ -17,7 +17,6 @@ package ghidra.app.plugin.core.debug.taint;
 
 import java.io.*;
 import java.nio.ByteBuffer;
-import java.nio.file.Path;
 import java.util.Collection;
 import java.util.List;
 
@@ -39,8 +38,8 @@ import ghidra.util.Msg;
 import ghidra.util.NumericUtilities;
 
 /**
- * Container for all the decompiler elements the users "selects" via the menu.
- * This data is used to build queries.
+ * Container for all the decompiler elements the users "selects" via the menu. This data is used to
+ * build queries.
  */
 public class AngrTaintState extends AbstractTaintState {
 
@@ -55,14 +54,14 @@ public class AngrTaintState extends AbstractTaintState {
 	private Address start;
 
 	@Override
-	public void buildQuery(List<String> paramList, Path engine, File indexDBFile,
+	public void buildQuery(List<String> paramList, String enginePath, File indexDBFile,
 			String indexDirectory) {
 		paramList.add("python");
-		paramList.add(engine.toString());
+		paramList.add(enginePath);
 	}
 
 	@Override
-	public void buildIndex(List<String> paramList, String engine_path, String facts_path,
+	public void buildIndex(List<String> paramList, String enginePath, String factsPath,
 			String indexDirectory) {
 		// Unused
 	}
@@ -158,7 +157,7 @@ public class AngrTaintState extends AbstractTaintState {
 		Collection<? extends TraceMemoryRegion> allRegions =
 			memoryManager.getRegionsAtSnap(current.getSnap());
 		for (TraceMemoryRegion region : allRegions) {
-			AddressRange range = region.getRange();
+			AddressRange range = region.getRange(current.getSnap());
 			Address min = range.getMinAddress();
 			int len = (int) range.getLength();
 			byte[] bytes = new byte[len];

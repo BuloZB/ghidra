@@ -28,8 +28,8 @@ import docking.widgets.fieldpanel.field.*;
 import generic.theme.GThemeDefaults.Colors;
 import generic.theme.Gui;
 import ghidra.app.util.NamespaceUtils;
-import ghidra.program.model.address.Address;
-import ghidra.program.model.listing.Program;
+import ghidra.program.model.address.*;
+import ghidra.program.model.listing.*;
 import ghidra.program.model.symbol.Symbol;
 import ghidra.program.model.symbol.SymbolTable;
 import ghidra.util.StringUtilities;
@@ -58,28 +58,24 @@ public class CommentUtils {
 			return null;
 		}
 
-		// this function will take any given Symbol annotations and change the text, replacing
-		// the symbol name with the address of the symbol
-		Function<Annotation, Annotation> symbolFixer = annotation -> {
-
+		// this function will take any annotation and call the annotation to perform updates to the 
+		// input text as needed.   An example is the Symbol annotation, which will replace any 
+		// symbol name with that symbol's address.  This allows future renames of that symbol to 
+		// appear in the comment text containing the annotation. 
+		Function<Annotation, Annotation> fixer = annotation -> {
 			String[] annotationParts = annotation.getAnnotationParts();
 			AnnotatedStringHandler handler = getAnnotationHandler(annotationParts);
-			if (!(handler instanceof SymbolAnnotatedStringHandler)) {
+
+			String[] updatedParts = handler.modify(annotationParts, program);
+			if (updatedParts == null) {
 				return annotation; // nothing to change
 			}
 
-			String rawText = annotation.getAnnotationText();
-			String updatedText =
-				convertAnnotationSymbolToAddress(annotationParts, rawText, program);
-			if (updatedText == null) {
-				return annotation; // nothing to change
-			}
-
-			return new Annotation(updatedText, program);
+			return new Annotation(updatedParts);
 		};
 
 		StringBuilder buffy = new StringBuilder();
-		List<CommentPart> parts = doParseTextIntoParts(rawCommentText, symbolFixer, program);
+		List<CommentPart> parts = doParseTextIntoParts(rawCommentText, fixer, program);
 		for (CommentPart part : parts) {
 			buffy.append(part.getRawText());
 		}
@@ -224,7 +220,7 @@ public class CommentUtils {
 			}
 
 			String annotationText = word.getWord();
-			Annotation annotation = new Annotation(annotationText, program);
+			Annotation annotation = new Annotation(annotationText);
 			annotation = fixerUpper.apply(annotation);
 			results.add(new AnnotationCommentPart(annotationText, annotation));
 
@@ -290,62 +286,30 @@ public class CommentUtils {
 	 */
 	private static int findAnnotationEnd(String comment, int start) {
 
-		boolean escaped = false;
-		boolean inQuote = false;
+		boolean escape = false;
+		boolean quote = false;
 		for (int i = start; i < comment.length(); i++) {
-
-			boolean wasEscaped = escaped;
-			escaped = false;
-			char prev = '\0';
-			if (i != 0 && !wasEscaped) {
-				prev = comment.charAt(i - 1);
+			char c = comment.charAt(i);
+			if (escape) {
+				escape = false;
+				continue;
 			}
 
-			char c = comment.charAt(i);
-			if (prev == '\\') {
-				if (Annotation.ESCAPABLE_CHARS.indexOf(c) != -1) {
-					escaped = true;
-					continue;
-				}
+			if (c == '\\') {
+				escape = true;
+				continue;
 			}
 
 			if (c == '"') {
-				inQuote = !inQuote;
+				quote = !quote;
 			}
 			else if (c == '}') {
-				if (!inQuote) {
+				if (!quote) {
 					return i + 1;
 				}
 			}
 		}
-
 		return -1;
-	}
-
-	private static String convertAnnotationSymbolToAddress(String[] annotationParts, String rawText,
-			Program program) {
-		if (annotationParts.length <= 1) {
-			return null;
-		}
-
-		if (program == null) { // this can happen during merge operations
-			return null;
-		}
-
-		Address address = program.getAddressFactory().getAddress(annotationParts[1]);
-		if (address != null) {
-			return null; // nothing to do
-		}
-
-		String originalValue = annotationParts[1];
-		List<Symbol> symbols = getSymbols(originalValue, program);
-		if (symbols.size() != 1) {
-			// no unique symbol, so leave it as string name
-			return null;
-		}
-
-		Address symbolAddress = symbols.get(0).getAddress();
-		return rawText.replaceFirst(Pattern.quote(originalValue), symbolAddress.toString());
 	}
 
 	/**
@@ -438,6 +402,51 @@ public class CommentUtils {
 
 	/*package*/ static Set<String> getAnnotationNames() {
 		return Collections.unmodifiableSet(getAnnotatedStringHandlerMap().keySet());
+	}
+
+	/**
+	 * Returns a list of offcut comments for the given code unit. All the offcut comments from 
+	 * possibly multiple addresses will be combined into a single list of comment lines.
+	 * @param cu the code unit to get offcut comments for
+	 * @param type the type of comment to retrieve (EOL, PRE, PLATE, POST)
+	 * @return a list of all offcut comments for the given code unit.
+	 */
+	public static List<String> getOffcutComments(CodeUnit cu, CommentType type) {
+		// internal data items handle EOL comments, so ignore EOL comments on items that
+		// have sub-components
+		if (type == CommentType.EOL && cu instanceof Data data) {
+			if (data.getNumComponents() > 0) {
+				return Collections.emptyList();
+			}
+		}
+
+		Address start = cu.getMinAddress().next();
+		Address end = cu.getMaxAddress();
+		if (start == null || start.compareTo(end) > 0) {
+			return Collections.emptyList();
+		}
+
+		Listing listing = cu.getProgram().getListing();
+		AddressSet addrSet = new AddressSet(start, cu.getMaxAddress());
+		AddressIterator it = listing.getCommentAddressIterator(type, addrSet, true);
+
+		if (!it.hasNext()) {
+			return Collections.emptyList();
+		}
+
+		List<String> offcutComments = new ArrayList<>();
+
+		while (it.hasNext()) {
+			Address next = it.next();
+			String comment = listing.getComment(type, next);
+			if (comment != null) {
+				String[] lines = StringUtilities.toLines(comment);
+				for (String line : lines) {
+					offcutComments.add(line);
+				}
+			}
+		}
+		return offcutComments;
 	}
 
 }

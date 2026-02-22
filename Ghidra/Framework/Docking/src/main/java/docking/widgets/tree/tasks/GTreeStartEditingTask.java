@@ -16,6 +16,7 @@
 package docking.widgets.tree.tasks;
 
 import java.util.Objects;
+import java.util.function.Predicate;
 
 import javax.swing.CellEditor;
 import javax.swing.JTree;
@@ -30,12 +31,12 @@ import ghidra.util.task.TaskMonitor;
 public class GTreeStartEditingTask extends GTreeTask {
 
 	private final GTreeNode modelParent;
-	private final GTreeNode editNode;
+	private final GTreeNode modelEditNode;
 
 	public GTreeStartEditingTask(GTree gTree, JTree jTree, GTreeNode editNode) {
 		super(gTree);
 		this.modelParent = tree.getModelNode(editNode.getParent());
-		this.editNode = editNode;
+		this.modelEditNode = tree.getModelNode(editNode);
 	}
 
 	@Override
@@ -54,13 +55,16 @@ public class GTreeStartEditingTask extends GTreeTask {
 	}
 
 	private void edit() {
-		TreePath path = editNode.getTreePath();
+
+		GTreeNode viewEditNode = tree.getViewNode(modelEditNode);
+
+		TreePath path = viewEditNode.getTreePath();
 		CellEditor cellEditor = tree.getCellEditor();
 		cellEditor.addCellEditorListener(new CellEditorListener() {
 			@Override
 			public void editingCanceled(ChangeEvent e) {
 				cellEditor.removeCellEditorListener(this);
-				tree.setSelectedNode(editNode); // reselect the node on cancel
+				tree.setSelectedNode(viewEditNode); // reselect the node on cancel
 			}
 
 			@Override
@@ -68,14 +72,20 @@ public class GTreeStartEditingTask extends GTreeTask {
 				String newName = Objects.toString(cellEditor.getCellEditorValue());
 				cellEditor.removeCellEditorListener(this);
 
-				// note: this call only works when the parent cannot have duplicate named nodes
-				tree.whenNodeIsReady(modelParent, newName, newNode -> {
+				// NOTE: there may be cases where this node search fails to correctly
+				// identify the renamed node when name and node class is insufficient to match.
+				Class<?> nodeClass = viewEditNode.getClass();
+				Predicate<GTreeNode> nodeMatches = n -> {
+					return nodeClass == n.getClass() && n.getName().equals(newName);
+				};
+				tree.whenNodeIsReady(modelParent, nodeMatches, newNode -> {
 					tree.setSelectedNode(newNode);
 				});
+
 			}
 		});
 
-		tree.setNodeEditable(editNode);
+		tree.setNodeEditable(viewEditNode);
 		jTree.startEditingAtPath(path);
 
 	}

@@ -30,9 +30,9 @@ import org.apache.commons.collections4.map.LazyMap;
 import org.apache.commons.lang3.StringUtils;
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
-import org.jdom.*;
-import org.jdom.input.SAXBuilder;
-import org.jdom.output.XMLOutputter;
+import org.jdom2.*;
+import org.jdom2.input.SAXBuilder;
+import org.jdom2.output.XMLOutputter;
 
 import docking.DockingUtils;
 import docking.Tool;
@@ -94,7 +94,7 @@ public class KeyBindingUtils {
 	public static ToolOptions importKeyBindings() {
 		// show a filechooser for the user to choose a location
 		InputStream inputStream = getInputStreamForFile(getStartingDir());
-		return createOptionsforKeybindings(inputStream);
+		return createOptionsforKeyBindings(inputStream);
 	}
 
 	/**
@@ -107,7 +107,7 @@ public class KeyBindingUtils {
 	 * @return An options object that is composed of key binding names and their
 	 *         associated keystrokes.
 	 */
-	public static ToolOptions createOptionsforKeybindings(InputStream inputStream) {
+	public static ToolOptions createOptionsforKeyBindings(InputStream inputStream) {
 		if (inputStream == null) {
 			return null;
 		}
@@ -157,7 +157,7 @@ public class KeyBindingUtils {
 		// create the xml structure, the outputter and then write the data
 		Element rootElement = keyBindingOptions.getXmlRoot(true);
 		Document document = new Document(rootElement);
-		XMLOutputter xmlOutputter = new GenericXMLOutputter();
+		XMLOutputter xmlOutputter = GenericXMLOutputter.getInstance();
 
 		try {
 			xmlOutputter.output(document, outputStream);
@@ -719,7 +719,8 @@ public class KeyBindingUtils {
 	// deprecated InputEvent mask types
 	@SuppressWarnings("deprecation")
 	private static boolean isControl(int mask) {
-		return (mask & InputEvent.CTRL_DOWN_MASK) != 0 || (mask & InputEvent.CTRL_MASK) != 0;
+		return (mask & InputEvent.CTRL_DOWN_MASK) != 0 || (mask & InputEvent.CTRL_MASK) != 0 ||
+			(mask & DockingUtils.CONTROL_KEY_MODIFIER_MASK) != 0;
 	}
 
 	// ignore the deprecated; remove when we are confident that all tool actions no longer use the

@@ -29,7 +29,7 @@ import javax.swing.*;
 import javax.swing.table.TableColumn;
 import javax.swing.table.TableColumnModel;
 
-import org.jdom.Element;
+import org.jdom2.Element;
 
 import db.Transaction;
 import docking.ActionContext;
@@ -78,7 +78,6 @@ import ghidra.trace.model.*;
 import ghidra.trace.model.guest.TracePlatform;
 import ghidra.trace.model.program.TraceProgramView;
 import ghidra.trace.model.time.schedule.TraceSchedule;
-import ghidra.trace.util.TraceAddressSpace;
 import ghidra.trace.util.TraceEvents;
 import ghidra.util.HelpLocation;
 import ghidra.util.Msg;
@@ -86,6 +85,7 @@ import ghidra.util.exception.CancelledException;
 import ghidra.util.table.GhidraTable;
 import ghidra.util.table.GhidraTableFilterPanel;
 import ghidra.util.table.column.AbstractGColumnRenderer;
+import ghidra.util.table.column.GColumnRenderer;
 
 public class DebuggerWatchesProvider extends ComponentProviderAdapter
 		implements DebuggerWatchesService {
@@ -151,12 +151,25 @@ public class DebuggerWatchesProvider extends ComponentProviderAdapter
 	protected enum WatchTableColumns
 		implements EnumeratedTableColumn<WatchTableColumns, DefaultWatchRow> {
 		EXPRESSION("Expression", String.class, WatchRow::getExpression, WatchRow::setExpression),
-		ADDRESS("Address", Address.class, WatchRow::getAddress),
+		COMMENT("Comment", String.class, WatchRow::getComment, WatchRow::setComment),
+		ADDRESS("Address", Address.class, WatchRow::getAddress) {
+			@Override
+			public GColumnRenderer<?> getRenderer() {
+				return CustomToStringCellRenderer.MONO_OBJECT;
+			}
+		},
 		SYMBOL("Symbol", Symbol.class, WatchRow::getSymbol),
-		VALUE("Value", String.class, WatchRow::getRawValueString, WatchRow::setRawValueString, //
-				WatchRow::isRawValueEditable),
+		VALUE("Value", String.class, WatchRow::getRawValueString, WatchRow::setRawValueString,
+				WatchRow::isRawValueEditable) {
+			private static final WatchValueCellRenderer RENDERER = new WatchValueCellRenderer();
+
+			@Override
+			public GColumnRenderer<?> getRenderer() {
+				return RENDERER;
+			}
+		},
 		TYPE("Type", DataType.class, WatchRow::getDataType, WatchRow::setDataType),
-		REPR("Repr", String.class, WatchRow::getValueString, WatchRow::setValueString, //
+		REPR("Repr", String.class, WatchRow::getValueString, WatchRow::setValueString,
 				WatchRow::isValueEditable),
 		ERROR("Error", String.class, WatchRow::getErrorMessage);
 
@@ -251,17 +264,23 @@ public class DebuggerWatchesProvider extends ComponentProviderAdapter
 		}
 
 		private void objectRestored(DomainObjectChangeRecord rec) {
-			addChanged(current.getView().getMemory());
+			for (AddressSpace space : current.getTrace()
+					.getBaseAddressFactory()
+					.getAllAddressSpaces()) {
+				if (space.isRegisterSpace() || space.isMemorySpace()) {
+					addChanged(new AddressRangeImpl(space.getMinAddress(), space.getMaxAddress()));
+				}
+			}
 		}
 
-		private void bytesChanged(TraceAddressSpace space, TraceAddressSnapRange range) {
-			if (space.getThread() == current.getThread() || space.getThread() == null) {
+		private void bytesChanged(AddressSpace space, TraceAddressSnapRange range) {
+			if (space.isMemorySpace() || current.isRegisterSpace(space)) {
 				addChanged(range.getRange());
 			}
 		}
 
-		private void stateChanged(TraceAddressSpace space, TraceAddressSnapRange range) {
-			if (space.getThread() == current.getThread() || space.getThread() == null) {
+		private void stateChanged(AddressSpace space, TraceAddressSnapRange range) {
+			if (space.isMemorySpace() || current.isRegisterSpace(space)) {
 				addChanged(range.getRange());
 			}
 		}
@@ -286,10 +305,11 @@ public class DebuggerWatchesProvider extends ComponentProviderAdapter
 		}
 	}
 
-	class WatchValueCellRenderer extends AbstractGColumnRenderer<String> {
+	static class WatchValueCellRenderer extends AbstractGColumnRenderer<String> {
 		@Override
 		public Component getTableCellRendererComponent(GTableCellRenderingData data) {
 			super.getTableCellRendererComponent(data);
+			setFont(getFixedWidthFont());
 			WatchRow row = (WatchRow) data.getRowObject();
 			if (!row.isKnown()) {
 				if (data.isSelected()) {
@@ -390,13 +410,6 @@ public class DebuggerWatchesProvider extends ComponentProviderAdapter
 		changeDebouncer.addListener(__ -> doCheckDepsAndReevaluate());
 	}
 
-	private void addChanged(AddressSetView toAdd) {
-		synchronized (changed) {
-			changed.add(toAdd);
-			changeDebouncer.contact(null);
-		}
-	}
-
 	private void addChanged(AddressRange toAdd) {
 		synchronized (changed) {
 			changed.add(toAdd);
@@ -454,10 +467,6 @@ public class DebuggerWatchesProvider extends ComponentProviderAdapter
 		});
 
 		TableColumnModel columnModel = watchTable.getColumnModel();
-		TableColumn addrCol = columnModel.getColumn(WatchTableColumns.ADDRESS.ordinal());
-		addrCol.setCellRenderer(CustomToStringCellRenderer.MONO_OBJECT);
-		TableColumn valCol = columnModel.getColumn(WatchTableColumns.VALUE.ordinal());
-		valCol.setCellRenderer(new WatchValueCellRenderer());
 		TableColumn typeCol = columnModel.getColumn(WatchTableColumns.TYPE.ordinal());
 		typeCol.setCellEditor(new WatchDataTypeEditor());
 	}

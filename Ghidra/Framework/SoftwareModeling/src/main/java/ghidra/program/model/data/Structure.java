@@ -44,7 +44,8 @@ public interface Structure extends Composite {
 	public DataTypeComponent getComponent(int ordinal) throws IndexOutOfBoundsException;
 
 	/**
-	 * Gets the first defined component located at or after the specified offset. 
+	 * Gets the first defined component located at or after the specified offset.  If a
+	 * component contains the specified offset that component will be returned.
 	 * Note: The returned component may be a zero-length component.
 	 * 
 	 * @param offset the byte offset into this structure
@@ -239,9 +240,16 @@ public interface Structure extends Composite {
 	/**
 	 * Inserts a new datatype at the specified offset into this structure. Inserting a component
 	 * will cause any conflicting components to shift down to the extent necessary to avoid a
-	 * conflict.
+	 * conflict.  The overall structure length will always increase when a non-zero-length
+	 * component is inserted. NOTE: bitfields may share an offset with other bitfields and
+	 * zero-length components.
 	 * <p>
-	 * This method does not support bit-field insertions which must use the method 
+	 * Any component insert at an offset will be placed after any zero-length components 
+	 * at the same offset but before any non-zero-length components.  The components which 
+	 * fall after the insertion point will have there ordinal incremented and offset 
+	 * adjusted as needed.
+	 * <p>
+	 * This method will defer bit-field insertions to the method 
 	 * {@link #insertBitFieldAt(int, int, int, DataType, int, String, String)}.
 	 * 
 	 * @param offset the byte offset into the structure where the new datatype is to be inserted.
@@ -388,7 +396,8 @@ public interface Structure extends Composite {
 	/**
 	 * Replaces all components containing the specified byte offset with a new component using the 
 	 * specified datatype, length, name and comment. If the offset corresponds to a bit-field 
-	 * more than one component may be consumed by this replacement.  
+	 * more than one component may be consumed by this replacement.  In general, this method 
+	 * should not be used to replace bitfield components. 
 	 * <p>
 	 * This method may not be used to replace a zero-length component since there may be any number 
 	 * of zero-length components at the same offset. If the only defined component(s) at the specified
@@ -436,7 +445,7 @@ public interface Structure extends Composite {
 	 * @throws IllegalArgumentException if amount &lt; 0
 	 */
 	public void growStructure(int amount);
-	
+
 	/**
 	 * Set the size of the structure to the specified byte-length.  If the length is shortened defined
 	 * components will be cleared and removed as required.

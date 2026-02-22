@@ -23,16 +23,14 @@ import ghidra.app.util.bin.format.elf.extend.MIPS_ElfExtension;
 import ghidra.app.util.bin.format.elf.relocation.MIPS_ElfRelocationHandler.MIPS_DeferredRelocation;
 import ghidra.program.model.address.*;
 import ghidra.program.model.data.PointerDataType;
-import ghidra.program.model.listing.BookmarkType;
 import ghidra.program.model.mem.MemoryAccessException;
 import ghidra.program.model.mem.MemoryBlock;
-import ghidra.program.model.reloc.RelocationResult;
 import ghidra.program.model.reloc.Relocation.Status;
+import ghidra.program.model.reloc.RelocationResult;
 import ghidra.program.model.symbol.Symbol;
 import ghidra.program.model.symbol.SymbolUtilities;
 import ghidra.util.*;
 import ghidra.util.exception.AssertException;
-import ghidra.util.exception.NotFoundException;
 
 /**
  * {@link MIPS_ElfRelocationContext} provides extended relocation context with the ability
@@ -74,8 +72,6 @@ class MIPS_ElfRelocationContext extends ElfRelocationContext<MIPS_ElfRelocationH
 		int typeId = relocation.getType();
 		int symbolIndex = relocation.getSymbolIndex();
 
-		saveValueForNextReloc = nextRelocationHasSameOffset(relocation);
-
 		RelocationResult lastResult = RelocationResult.FAILURE;
 		if (getElfHeader().is64Bit()) {
 
@@ -101,7 +97,10 @@ class MIPS_ElfRelocationContext extends ElfRelocationContext<MIPS_ElfRelocationH
 				typeId >>= 8;
 				int nextRelocType = (n < 2) ? (typeId & 0xff) : 0;
 				if (nextRelocType == MIPS_ElfRelocationType.R_MIPS_NONE.typeId) {
-					saveValueForNextReloc = false;
+					saveValueForNextReloc = nextRelocationHasSameOffset(relocation);
+				}
+				else {
+					saveValueForNextReloc = true;
 				}
 
 				RelocationResult result =
@@ -119,6 +118,8 @@ class MIPS_ElfRelocationContext extends ElfRelocationContext<MIPS_ElfRelocationH
 			return lastResult;
 		}
 
+		// 32-bit ELF
+		saveValueForNextReloc = nextRelocationHasSameOffset(relocation);
 		return doRelocate(relocation, relocationAddress, typeId, symbolIndex);
 	}
 

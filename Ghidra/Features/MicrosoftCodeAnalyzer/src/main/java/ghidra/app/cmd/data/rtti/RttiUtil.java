@@ -23,8 +23,10 @@ import ghidra.app.cmd.data.TypeDescriptorModel;
 import ghidra.app.util.NamespaceUtils;
 import ghidra.app.util.PseudoDisassembler;
 import ghidra.app.util.datatype.microsoft.MSDataTypeUtils;
+import ghidra.app.util.demangler.DemangledException;
 import ghidra.app.util.demangler.DemangledObject;
-import ghidra.app.util.demangler.DemanglerUtil;
+import ghidra.app.util.demangler.microsoft.MicrosoftDemangler;
+import ghidra.app.util.demangler.microsoft.MicrosoftMangledContext;
 import ghidra.program.model.address.Address;
 import ghidra.program.model.address.AddressSetView;
 import ghidra.program.model.listing.*;
@@ -82,16 +84,22 @@ public class RttiUtil {
 		}
 
 		// check for similar symbol
+		MicrosoftDemangler demangler = new MicrosoftDemangler();
 		DemangledObject matchingDemangledObject = null;
 		SymbolIterator symbols = symbolTable.getSymbolsAsIterator(rttiAddress);
 		for (Symbol symbol : symbols) {
 			String name = symbol.getName();
-
-			// if mangled get the matching demangled object if there is one and save for after loop
-			// in case symbols are not demangled yet
-			DemangledObject demangledObject = DemanglerUtil.demangle(name);
-			if (demangledObject != null && demangledObject.getName().contains(rttiSuffix)) {
-				matchingDemangledObject = demangledObject;
+			try {
+				MicrosoftMangledContext mangledContext =
+					demangler.createMangledContext(name, null, program, symbol.getAddress());
+				DemangledObject demangledObject = demangler.demangle(mangledContext);
+				if (demangledObject != null && demangledObject.getName().contains(rttiSuffix)) {
+					matchingDemangledObject = demangledObject;
+					continue;
+				}
+			}
+			catch (DemangledException e) {
+				// Couldn't demangle.
 				continue;
 			}
 
@@ -164,6 +172,10 @@ public class RttiUtil {
 			name = name.replace("'", "").replace("`", "");
 			try {
 				symbol.setName(name, symbol.getSource());
+
+				//do this in case the mangled name is currently primary which will cause demangler
+				//to replace the ticks again once demangled since demangler only demangles primary 
+				symbol.setPrimary();
 				return true;
 			}
 			catch (DuplicateNameException e) {

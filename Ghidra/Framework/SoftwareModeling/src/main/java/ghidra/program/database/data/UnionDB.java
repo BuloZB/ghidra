@@ -25,7 +25,6 @@ import ghidra.program.database.DBObjectCache;
 import ghidra.program.model.data.*;
 import ghidra.program.model.data.DataTypeConflictHandler.ConflictResult;
 import ghidra.program.model.mem.MemBuffer;
-import ghidra.util.Msg;
 
 /**
  * Database implementation for the Union data type.
@@ -34,7 +33,7 @@ class UnionDB extends CompositeDB implements UnionInternal {
 
 	private int unionLength;
 	private int unionAlignment;  // reflects stored alignment, -1 if not yet stored
-	private int computedAlignment = -1; // cached alignment if not yet stored
+	private int computedAlignment = -1; // lazy, cached alignment, -1 if not yet computed
 
 	private List<DataTypeComponentDB> components;
 
@@ -132,7 +131,7 @@ class UnionDB extends CompositeDB implements UnionInternal {
 
 		if (validateAlignAndNotify) {
 			dataType = resolve(dataType);
-			checkAncestry(dataType);
+			DataTypeUtilities.checkAncestry(this, dataType);
 		}
 
 		length = getPreferredComponentLength(dataType, length);
@@ -170,7 +169,7 @@ class UnionDB extends CompositeDB implements UnionInternal {
 			dataType = adjustBitField(dataType);
 
 			dataType = resolve(dataType);
-			checkAncestry(dataType);
+			DataTypeUtilities.checkAncestry(this, dataType);
 
 			getComputedAlignment(true); // ensure previous alignment has been stored
 
@@ -337,12 +336,14 @@ class UnionDB extends CompositeDB implements UnionInternal {
 	void doReplaceWith(UnionInternal union, boolean notify)
 			throws DataTypeDependencyException, IOException {
 
+		int oldAlignment = getAlignment();
+		int oldLength = unionLength;
+
 		// pre-resolved component types to catch dependency issues early
 		DataTypeComponent[] otherComponents = union.getComponents();
 		DataType[] resolvedDts = new DataType[otherComponents.length];
 		for (int i = 0; i < otherComponents.length; i++) {
 			resolvedDts[i] = doCheckedResolve(otherComponents[i].getDataType());
-			checkAncestry(resolvedDts[i]);
 		}
 
 		for (DataTypeComponentDB dtc : components) {
@@ -360,13 +361,21 @@ class UnionDB extends CompositeDB implements UnionInternal {
 			doAdd(resolvedDts[i], dtc.getLength(), dtc.getFieldName(), dtc.getComment(), false);
 		}
 
-		record.setString(CompositeDBAdapter.COMPOSITE_COMMENT_COL, union.getDescription());
-		compositeAdapter.updateRecord(record, false);
+		repack(false, false);
 
-		repack(false, false); // updates timestamp
+		record.setString(CompositeDBAdapter.COMPOSITE_COMMENT_COL, union.getDescription());
+		compositeAdapter.updateRecord(record, true); // updates timestamp
 
 		if (notify) {
-			notifySizeChanged(false); // assume size and/or alignment changed
+			if (unionLength != oldLength) {
+				notifySizeChanged(false);
+			}
+			else if (unionAlignment != oldAlignment) {
+				notifyAlignmentChanged(false);
+			}
+			else {
+				dataMgr.dataTypeChanged(this, false);
+			}
 		}
 
 		if (pointerPostResolveRequired) {
@@ -525,16 +534,15 @@ class UnionDB extends CompositeDB implements UnionInternal {
 
 	@Override
 	public void dataTypeAlignmentChanged(DataType dt) {
-		if (!isPackingEnabled()) {
+		if (deleting) {
 			return;
-		}
-		if (dt instanceof BitFieldDataType) {
-			return; // unsupported
 		}
 		lock.acquire();
 		try {
 			checkDeleted();
-			repack(true, true);
+			if (isPackingEnabled()) {
+				repack(true, true);
+			}
 		}
 		finally {
 			lock.release();
@@ -543,6 +551,9 @@ class UnionDB extends CompositeDB implements UnionInternal {
 
 	@Override
 	public void dataTypeSizeChanged(DataType dt) {
+		if (deleting) {
+			return;
+		}
 		if (dt instanceof BitFieldDataType) {
 			return; // unsupported
 		}
@@ -709,26 +720,41 @@ class UnionDB extends CompositeDB implements UnionInternal {
 
 	@Override
 	public void dataTypeDeleted(DataType dt) {
+		if (deleting) {
+			return;
+		}
 		lock.acquire();
 		try {
 			checkDeleted();
 			boolean changed = false;
 			for (int i = components.size() - 1; i >= 0; i--) { // reverse order
 				DataTypeComponentDB dtc = components.get(i);
-				boolean removeBitFieldComponent = false;
 				if (dtc.isBitFieldComponent()) {
+
+					// Do not allow bitfield to be destroyed
+					// If base type is removed - revert to primitive type
 					BitFieldDataType bitfieldDt = (BitFieldDataType) dtc.getDataType();
-					removeBitFieldComponent = bitfieldDt.getBaseDataType() == dt;
+					if (bitfieldDt.getBaseDataType() == dt) {
+						AbstractIntegerDataType primitiveDt = bitfieldDt.getPrimitiveBaseDataType();
+						dataMgr.blockDataTypeRemoval(primitiveDt);
+						if (primitiveDt != dt && updateBitFieldDataType(dtc, dt, primitiveDt)) {
+							dtc.setComment(
+								prependComment("Type '" + dt.getDisplayName() + "' was deleted",
+									dtc.getComment()));
+							changed = true;
+						}
+					}
 				}
-				if (removeBitFieldComponent || dtc.getDataType() == dt) {
+				else if (dtc.getDataType() == dt) {
 					dt.removeParent(this);
-					components.remove(i);
-					removeComponentRecord(dtc.getKey());
-					shiftOrdinals(i, -1);
+					dtc.setDataType(BadDataType.dataType); // updates record
+					dataMgr.getSettingsAdapter().removeAllSettingsRecords(dtc.getKey());
+					dtc.setComment(prependComment("Type '" + dt.getDisplayName() + "' was deleted",
+						dtc.getComment()));
 					changed = true;
 				}
 			}
-			if (changed && !repack(false, true)) {
+			if (changed && (!isPackingEnabled() || !repack(false, true))) {
 				dataMgr.dataTypeChanged(this, false);
 			}
 		}
@@ -813,66 +839,35 @@ class UnionDB extends CompositeDB implements UnionInternal {
 
 	@Override
 	public void dataTypeReplaced(DataType oldDt, DataType newDt) {
-		if (oldDt == this) {
+		if (deleting) {
 			return;
 		}
+		DataTypeUtilities.checkValidReplacement(oldDt, newDt);
 		lock.acquire();
 		try {
 			checkDeleted();
 			DataType replacementDt = newDt;
 			try {
-				validateDataType(replacementDt);
-				if (!(replacementDt instanceof DataTypeDB) ||
-					(replacementDt.getDataTypeManager() != getDataTypeManager())) {
-					replacementDt = resolve(replacementDt);
-				}
-				checkAncestry(replacementDt);
+				replacementDt = validateDataType(replacementDt); // blocks DEFAULT use
+				replacementDt = replacementDt.clone(dataMgr);
+				DataTypeUtilities.checkAncestry(this, replacementDt);
 			}
 			catch (Exception e) {
-				// TODO: should we flag bad replacement
 				replacementDt = Undefined1DataType.dataType;
 			}
 			boolean changed = false;
 			for (int i = components.size() - 1; i >= 0; i--) {
-
 				DataTypeComponentDB dtc = components.get(i);
-
-				boolean remove = false;
 				if (dtc.isBitFieldComponent()) {
-					try {
-						changed |= updateBitFieldDataType(dtc, oldDt, replacementDt);
-					}
-					catch (InvalidDataTypeException e) {
-						Msg.error(this,
-							"Invalid bitfield replacement type " + newDt.getName() +
-								", removing bitfield " + dtc.getDataType().getName() + ": " +
-								getPathName());
-						remove = true;
-					}
+					changed |= updateBitFieldDataType(dtc, oldDt, replacementDt);
 				}
 				else if (dtc.getDataType() == oldDt) {
-					if (replacementDt == DEFAULT) {
-						Msg.error(this,
-							"Invalid replacement type " + newDt.getName() +
-								", removing component " + dtc.getDataType().getName() + ": " +
-								getPathName());
-						remove = true;
-					}
-					else {
-						int len = getPreferredComponentLength(newDt, dtc.getLength());
-						dtc.setLength(len, false);
-						oldDt.removeParent(this);
-						dtc.setDataType(replacementDt); // updates record
-						dataMgr.getSettingsAdapter().removeAllSettingsRecords(dtc.getKey());
-						replacementDt.addParent(this);
-						changed = true;
-					}
-				}
-				if (remove) {
+					int len = getPreferredComponentLength(newDt, dtc.getLength());
+					dtc.setLength(len, false);
 					oldDt.removeParent(this);
-					components.remove(i);
-					removeComponentRecord(dtc.getKey());
-					shiftOrdinals(i, -1);
+					dtc.setDataType(replacementDt); // updates record
+					dataMgr.getSettingsAdapter().removeAllSettingsRecords(dtc.getKey());
+					replacementDt.addParent(this);
 					changed = true;
 				}
 			}
@@ -893,22 +888,6 @@ class UnionDB extends CompositeDB implements UnionInternal {
 	@Override
 	public void dataTypeNameChanged(DataType dt, String oldName) {
 		// ignored
-	}
-
-	@Override
-	public boolean dependsOn(DataType dt) {
-		lock.acquire();
-		try {
-			checkIsValid();
-			if (getNumComponents() == 1) {
-				DataTypeComponent dtc = getComponent(0);
-				return dtc.getDataType().dependsOn(dt);
-			}
-			return false;
-		}
-		finally {
-			lock.release();
-		}
 	}
 
 	@Override
