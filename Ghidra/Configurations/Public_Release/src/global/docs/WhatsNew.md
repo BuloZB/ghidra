@@ -65,6 +65,15 @@ fresh import of any program you will continue to reverse engineer to see if the 
 provides better results.
 
 ## Bitfields
+The Decompiler now recovers and displays the names of **bitfield** components in structured 
+data-types, when analyzing code that manipulates them.
+
+Low-level details of how code isolates an individual bitfield are simplified away in Decompiler 
+output. Instead, the bitfield is displayed as a single logical value, by name, using standard field
+access notation. Both expressions that *read from* or *write to* a bitfield can be recovered.
+
+Many optimized expressions that read, write, or compare multiple bitfields at once can also be
+broken out so that the individual bitfields are visible.
 
 ## Objective-C
 The old Objective-C analyzers:
@@ -108,6 +117,11 @@ other sources, such as PDB.  There is currently no simple way to try to match th
 encoded form; thus, using the encoded form can also create bifurcation in the namespace.
 
 ## Processors
+
+## Jython Extension
+Jython support is now delivered as a Ghidra Extension, which means an extra step is required to 
+install it. If you require Jython, simply go to `File -> Install Extensions` in the Ghidra
+Front End GUI and check "Jython". Restart Ghidra and Jython support will be enabled.
 
 ## Additional Bug Fixes and Enhancements
 Numerous other new features, improvements, and bug fixes are fully listed in the 
