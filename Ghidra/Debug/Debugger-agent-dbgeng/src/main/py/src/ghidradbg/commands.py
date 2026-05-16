@@ -245,10 +245,8 @@ def start_trace(name: str) -> None:
     if frame is None:
         raise AssertionError("cannot locate schema.xml")
     parent = os.path.dirname(inspect.getfile(frame))
-    if util.is_exdi():
-        schema_fn = os.path.join(parent, 'schema_exdi.xml')
-    else:
-        schema_fn = os.path.join(parent, 'schema.xml')
+    schema_fn = os.path.join(parent, 'schema_exdi.xml' if util.is_exdi() else 'schema.xml')
+
     with open(schema_fn, 'r') as schema_file:
         schema_xml = schema_file.read()
     using_dbgmodel = os.getenv('OPT_USE_DBGMODEL') == "true"
@@ -1076,10 +1074,10 @@ def put_single_breakpoint(bp, ibobj, nproc: int, ikeys: List[str]) -> None:
     if bp.GetType()[0] == DbgEng.DEBUG_BREAKPOINT_DATA:
         width, prot = bp.GetDataParameters()
         width = str(width)
-        prot = {4: 'HW_EXECUTE', 2: 'READ', 1: 'WRITE'}[prot]
+        prot = {4: 'X', 2: 'R', 1: 'W'}[prot]
     else:
         width = ' '
-        prot = 'SW_EXECUTE'
+        prot = 'x'
 
     if address is not None:  # Implies execution break
         base, addr = mapper.map(nproc, address)
