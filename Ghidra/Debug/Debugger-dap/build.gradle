@@ -13,24 +13,18 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
-package ghidra.app.util.bin.format;
 
-import java.io.IOException;
-import java.io.RandomAccessFile;
+apply from: "${rootProject.projectDir}/gradle/javaProject.gradle"
+apply from: "${rootProject.projectDir}/gradle/helpProject.gradle"
+apply from: "${rootProject.projectDir}/gradle/distributableGhidraModule.gradle"
 
-import ghidra.util.DataConverter;
+apply plugin: 'eclipse'
+eclipse.project.name = 'Debug Debugger-dap'
 
-/**
- * An interface for writing out class state information
- */
-public interface Writeable {
-	/**
-	 * Writes this object to the specified random access file using the data converter to handle 
-	 * endianness
-	 * 
-	 * @param raf the random access file
-	 * @param dc the data converter
-	 * @throws IOException if an I/O error occurs
-	 */
-	public void write(RandomAccessFile raf, DataConverter dc) throws IOException;
+dependencies {
+	api project(':Debugger-rmi-trace')
+	api "org.eclipse.lsp4j:org.eclipse.lsp4j:1.0.0"
+	api "org.eclipse.lsp4j:org.eclipse.lsp4j.debug:1.0.0"
+	api "org.eclipse.lsp4j:org.eclipse.lsp4j.jsonrpc:1.0.0"
+	api "org.eclipse.lsp4j:org.eclipse.lsp4j.jsonrpc.debug:1.0.0"
 }
